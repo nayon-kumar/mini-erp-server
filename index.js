@@ -29,7 +29,8 @@ async function run() {
 
     const productsCollection = db.collection("products");
     const customersCollection = db.collection("customers");
-    const suppliersCollection = db.collection("suppliers");
+    // Remove this line - no suppliers collection
+    // const suppliersCollection = db.collection("suppliers");
     const purchasesCollection = db.collection("purchases");
     const salesCollection = db.collection("sales");
     const usersCollection = db.collection("user");
@@ -74,10 +75,217 @@ async function run() {
       }
     });
 
-    // Get All Products
+    // Get Products (Public)
+    // Search + Category + Price + Sort + Pagination
+
     app.get("/products", async (req, res) => {
-      const result = await productsCollection.find().toArray();
-      res.send(result);
+      try {
+        const {
+          search = "",
+          category,
+          minPrice,
+          maxPrice,
+          sort = "newest",
+          page = 1,
+          limit = 12,
+        } = req.query;
+
+        const query = {};
+
+        // Search by product name
+        if (search) {
+          query.productName = {
+            $regex: search,
+            $options: "i",
+          };
+        }
+
+        // Filter by category
+        if (category && category !== "All") {
+          query.category = category;
+        }
+
+        // Filter by selling price
+        if (minPrice || maxPrice) {
+          query.sellingPrice = {};
+
+          if (minPrice) {
+            query.sellingPrice.$gte = Number(minPrice);
+          }
+
+          if (maxPrice) {
+            query.sellingPrice.$lte = Number(maxPrice);
+          }
+        }
+
+        // Show only active products
+        query.status = "active";
+
+        // Sorting
+        let sortOption = {};
+
+        switch (sort) {
+          case "priceLow":
+            sortOption = { sellingPrice: 1 };
+            break;
+
+          case "priceHigh":
+            sortOption = { sellingPrice: -1 };
+            break;
+
+          case "oldest":
+            sortOption = { createdAt: 1 };
+            break;
+
+          default:
+            sortOption = { createdAt: -1 };
+        }
+
+        const skip = (Number(page) - 1) * Number(limit);
+
+        const total = await productsCollection.countDocuments(query);
+
+        const products = await productsCollection
+          .find(query)
+          .sort(sortOption)
+          .skip(skip)
+          .limit(Number(limit))
+          .toArray();
+
+        res.send({
+          success: true,
+          total,
+          currentPage: Number(page),
+          totalPages: Math.ceil(total / Number(limit)),
+          products,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Buy Product
+    app.post("/orders", async (req, res) => {
+      try {
+        const order = req.body;
+
+        order.createdAt = new Date();
+        order.status = "Pending";
+
+        const result = await db.collection("orders").insertOne(order);
+
+        res.status(201).send({
+          success: true,
+          insertedId: result.insertedId,
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Get Featured Products
+
+    app.get("/products/featured", async (req, res) => {
+      try {
+        const products = await productsCollection
+          .find({ status: "active" })
+          .sort({ createdAt: -1 })
+          .limit(3)
+          .toArray();
+
+        res.send({
+          success: true,
+          products,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Get categories
+
+    app.get("/products/categories", async (req, res) => {
+      try {
+        const categories = await productsCollection.distinct("category");
+
+        res.send({
+          success: true,
+          categories,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Get all suppliers - FIXED: Query from usersCollection with role "supplier"
+    app.get("/suppliers", async (req, res) => {
+      try {
+        const suppliers = await usersCollection
+          .find({ role: "supplier" })
+          .project({ password: 0 }) // Exclude password for security
+          .toArray();
+
+        res.send({
+          success: true,
+          data: suppliers,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Get Single Supplier - NEW endpoint for getting individual supplier
+    app.get("/suppliers/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({
+            success: false,
+            message: "Invalid supplier ID format",
+          });
+        }
+
+        const supplier = await usersCollection.findOne({
+          _id: new ObjectId(id),
+          role: "supplier",
+        });
+
+        if (!supplier) {
+          return res.status(404).send({
+            success: false,
+            message: "Supplier not found",
+          });
+        }
+
+        // Remove password from response
+        delete supplier.password;
+
+        res.send({
+          success: true,
+          data: supplier,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
     });
 
     // Get Single Product
