@@ -29,11 +29,10 @@ async function run() {
 
     const productsCollection = db.collection("products");
     const customersCollection = db.collection("customers");
-    // Remove this line - no suppliers collection
-    // const suppliersCollection = db.collection("suppliers");
     const purchasesCollection = db.collection("purchases");
     const salesCollection = db.collection("sales");
     const usersCollection = db.collection("user");
+    const ordersCollection = db.collection("orders");
 
     /*
      * ====================================
@@ -167,24 +166,349 @@ async function run() {
       }
     });
 
-    // Buy Product
+    // Buy Product - Create Order
     app.post("/orders", async (req, res) => {
       try {
         const order = req.body;
 
-        order.createdAt = new Date();
-        order.status = "Pending";
+        // Validate required fields
+        if (
+          !order.productId ||
+          !order.productName ||
+          !order.quantity ||
+          !order.price
+        ) {
+          return res.status(400).send({
+            success: false,
+            message:
+              "Missing required fields: productId, productName, quantity, price",
+          });
+        }
 
-        const result = await db.collection("orders").insertOne(order);
+        // Create order object
+        const newOrder = {
+          productId: order.productId,
+          productName: order.productName,
+          quantity: Number(order.quantity),
+          price: Number(order.price),
+          totalAmount: Number(order.quantity) * Number(order.price),
+          supplier: order.supplier || "",
+          status: order.status || "Pending",
+          orderDate: order.orderDate || new Date().toISOString(),
+          customerName: order.customerName || "Guest User",
+          customerEmail: order.customerEmail || "guest@example.com",
+          createdAt: new Date(),
+        };
+
+        const result = await ordersCollection.insertOne(newOrder);
+
+        // Update product stock
+        if (order.productId) {
+          const productId = new ObjectId(order.productId);
+          const product = await productsCollection.findOne({ _id: productId });
+
+          if (product) {
+            const newStock = Math.max(
+              0,
+              product.stock - Number(order.quantity),
+            );
+            await productsCollection.updateOne(
+              { _id: productId },
+              { $set: { stock: newStock } },
+            );
+          }
+        }
 
         res.status(201).send({
           success: true,
+          message: "Order placed successfully",
           insertedId: result.insertedId,
+          order: newOrder,
         });
       } catch (err) {
         res.status(500).send({
           success: false,
           message: err.message,
+        });
+      }
+    });
+
+    // Get All Orders
+    app.get("/orders", async (req, res) => {
+      try {
+        const {
+          search = "",
+          status,
+          sort = "newest",
+          page = 1,
+          limit = 10,
+        } = req.query;
+
+        const query = {};
+
+        // Search by product name or customer name
+        if (search) {
+          query.$or = [
+            { productName: { $regex: search, $options: "i" } },
+            { customerName: { $regex: search, $options: "i" } },
+            { supplier: { $regex: search, $options: "i" } },
+          ];
+        }
+
+        // Filter by status
+        if (status && status !== "All") {
+          query.status = status;
+        }
+
+        // Sorting
+        let sortOption = {};
+        switch (sort) {
+          case "oldest":
+            sortOption = { createdAt: 1 };
+            break;
+          case "amountLow":
+            sortOption = { totalAmount: 1 };
+            break;
+          case "amountHigh":
+            sortOption = { totalAmount: -1 };
+            break;
+          default:
+            sortOption = { createdAt: -1 };
+        }
+
+        const skip = (Number(page) - 1) * Number(limit);
+        const total = await ordersCollection.countDocuments(query);
+
+        const orders = await ordersCollection
+          .find(query)
+          .sort(sortOption)
+          .skip(skip)
+          .limit(Number(limit))
+          .toArray();
+
+        res.send({
+          success: true,
+          total,
+          currentPage: Number(page),
+          totalPages: Math.ceil(total / Number(limit)),
+          orders,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Get Single Order
+    app.get("/orders/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({
+            success: false,
+            message: "Invalid order ID format",
+          });
+        }
+
+        const order = await ordersCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!order) {
+          return res.status(404).send({
+            success: false,
+            message: "Order not found",
+          });
+        }
+
+        res.send({
+          success: true,
+          data: order,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Update Order Status
+    app.put("/orders/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { status } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({
+            success: false,
+            message: "Invalid order ID format",
+          });
+        }
+
+        if (!status) {
+          return res.status(400).send({
+            success: false,
+            message: "Status is required",
+          });
+        }
+
+        // Validate status
+        const validStatuses = [
+          "Pending",
+          "Processing",
+          "Shipped",
+          "Delivered",
+          "Cancelled",
+        ];
+        if (!validStatuses.includes(status)) {
+          return res.status(400).send({
+            success: false,
+            message: `Invalid status. Valid statuses: ${validStatuses.join(", ")}`,
+          });
+        }
+
+        const result = await ordersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: status,
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({
+            success: false,
+            message: "Order not found",
+          });
+        }
+
+        res.send({
+          success: true,
+          message: "Order status updated successfully",
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Delete Order
+    app.delete("/orders/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({
+            success: false,
+            message: "Invalid order ID format",
+          });
+        }
+
+        // Check if order exists
+        const order = await ordersCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!order) {
+          return res.status(404).send({
+            success: false,
+            message: "Order not found",
+          });
+        }
+
+        // Only allow deletion of Pending orders
+        if (order.status !== "Pending") {
+          return res.status(400).send({
+            success: false,
+            message: "Only pending orders can be deleted",
+          });
+        }
+
+        // Restore product stock
+        if (order.productId) {
+          try {
+            const productId = new ObjectId(order.productId);
+            const product = await productsCollection.findOne({
+              _id: productId,
+            });
+
+            if (product) {
+              const newStock = product.stock + Number(order.quantity);
+              await productsCollection.updateOne(
+                { _id: productId },
+                { $set: { stock: newStock } },
+              );
+            }
+          } catch (err) {
+            console.error("Error restoring stock:", err);
+          }
+        }
+
+        const result = await ordersCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send({
+          success: true,
+          message: "Order deleted successfully",
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // Get Order Statistics
+    app.get("/orders/stats", async (req, res) => {
+      try {
+        const totalOrders = await ordersCollection.countDocuments();
+
+        const pendingOrders = await ordersCollection.countDocuments({
+          status: "Pending",
+        });
+
+        const completedOrders = await ordersCollection.countDocuments({
+          status: { $in: ["Delivered", "Shipped"] },
+        });
+
+        const totalRevenue = await ordersCollection
+          .aggregate([
+            { $match: { status: { $in: ["Delivered", "Shipped"] } } },
+            { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+          ])
+          .toArray();
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const todayOrders = await ordersCollection.countDocuments({
+          createdAt: { $gte: today },
+        });
+
+        res.send({
+          success: true,
+          stats: {
+            totalOrders,
+            pendingOrders,
+            completedOrders,
+            totalRevenue: totalRevenue[0]?.total || 0,
+            todayOrders,
+          },
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
         });
       }
     });
@@ -229,12 +553,12 @@ async function run() {
       }
     });
 
-    // Get all suppliers - FIXED: Query from usersCollection with role "supplier"
+    // Get all suppliers - Query from usersCollection with role "supplier"
     app.get("/suppliers", async (req, res) => {
       try {
         const suppliers = await usersCollection
           .find({ role: "supplier" })
-          .project({ password: 0 }) // Exclude password for security
+          .project({ password: 0 })
           .toArray();
 
         res.send({
@@ -249,7 +573,7 @@ async function run() {
       }
     });
 
-    // Get Single Supplier - NEW endpoint for getting individual supplier
+    // Get Single Supplier
     app.get("/suppliers/:id", async (req, res) => {
       try {
         const id = req.params.id;
@@ -273,7 +597,6 @@ async function run() {
           });
         }
 
-        // Remove password from response
         delete supplier.password;
 
         res.send({
@@ -350,7 +673,7 @@ async function run() {
       try {
         const users = await usersCollection
           .find({})
-          .project({ password: 0 }) // Exclude password if it exists
+          .project({ password: 0 })
           .toArray();
 
         res.send({
@@ -388,7 +711,6 @@ async function run() {
           });
         }
 
-        // Remove password from response if it exists
         delete user.password;
 
         res.send({
@@ -416,7 +738,6 @@ async function run() {
           });
         }
 
-        // Check if user exists
         const existingUser = await usersCollection.findOne({
           _id: new ObjectId(id),
         });
@@ -428,35 +749,28 @@ async function run() {
           });
         }
 
-        // Build update object - only include fields that are provided
         const updateFields = {};
 
-        // Fields that can be updated based on your schema
         const allowedFields = [
           "name",
           "email",
           "role",
           "emailVerified",
-          "image", // Add if you have profile image
-          "phone", // Add if you have phone field
-          "address", // Add if you have address field
+          "image",
+          "phone",
+          "address",
         ];
 
-        // Add fields that exist in the request body
         allowedFields.forEach((field) => {
           if (userData[field] !== undefined) {
             updateFields[field] = userData[field];
           }
         });
 
-        // Handle password separately if it's provided
         if (userData.password) {
-          // In production, you should hash the password before storing
-          // For demo, we'll just store it directly (not recommended for production)
           updateFields.password = userData.password;
         }
 
-        // Add updated timestamp
         updateFields.updatedAt = new Date();
 
         const result = await usersCollection.updateOne(
@@ -478,7 +792,6 @@ async function run() {
           });
         }
 
-        // Get the updated user
         const updatedUser = await usersCollection.findOne({
           _id: new ObjectId(id),
         });
@@ -509,7 +822,6 @@ async function run() {
           });
         }
 
-        // Check if user exists
         const user = await usersCollection.findOne({
           _id: new ObjectId(id),
         });
@@ -521,7 +833,6 @@ async function run() {
           });
         }
 
-        // Prevent deleting admin users
         if (user.role === "admin") {
           return res.status(403).send({
             success: false,
@@ -553,7 +864,312 @@ async function run() {
       }
     });
 
-    // Bulk Delete Users (Optional)
+    // Monthly Revenue Chart
+    app.get("/reports/revenue", async (req, res) => {
+      try {
+        const result = await ordersCollection
+          .aggregate([
+            {
+              $match: {
+                status: {
+                  $in: ["Delivered", "Shipped"],
+                },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  month: {
+                    $month: "$createdAt",
+                  },
+                },
+                revenue: {
+                  $sum: "$totalAmount",
+                },
+              },
+            },
+            {
+              $sort: {
+                "_id.month": 1,
+              },
+            },
+          ])
+          .toArray();
+
+        const months = [
+          "",
+          "Jan",
+          "Feb",
+          "Mar",
+          "Apr",
+          "May",
+          "Jun",
+          "Jul",
+          "Aug",
+          "Sep",
+          "Oct",
+          "Nov",
+          "Dec",
+        ];
+
+        const data = result.map((item) => ({
+          month: months[item._id.month],
+          revenue: item.revenue,
+        }));
+
+        res.send({
+          success: true,
+          data,
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Top Selling Products
+    app.get("/reports/top-products", async (req, res) => {
+      try {
+        const result = await ordersCollection
+          .aggregate([
+            {
+              $group: {
+                _id: "$productName",
+                sold: {
+                  $sum: "$quantity",
+                },
+                revenue: {
+                  $sum: "$totalAmount",
+                },
+              },
+            },
+            {
+              $sort: {
+                sold: -1,
+              },
+            },
+            {
+              $limit: 5,
+            },
+          ])
+          .toArray();
+
+        res.send({
+          success: true,
+          data: result,
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Low Stock Products
+    app.get("/reports/low-stock", async (req, res) => {
+      try {
+        const products = await productsCollection
+          .find({
+            stock: {
+              $lte: 5,
+            },
+          })
+          .sort({
+            stock: 1,
+          })
+          .toArray();
+
+        res.send({
+          success: true,
+          data: products,
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Recent Orders
+    app.get("/reports/recent-orders", async (req, res) => {
+      try {
+        const orders = await ordersCollection
+          .find()
+          .sort({
+            createdAt: -1,
+          })
+          .limit(10)
+          .toArray();
+
+        res.send({
+          success: true,
+          data: orders,
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Recent Purchases
+    app.get("/reports/recent-purchases", async (req, res) => {
+      try {
+        const purchases = await purchasesCollection
+          .find()
+          .sort({
+            createdAt: -1,
+          })
+          .limit(10)
+          .toArray();
+
+        res.send({
+          success: true,
+          data: purchases,
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Inventory Report
+    app.get("/reports/inventory", async (req, res) => {
+      try {
+        const products = await productsCollection
+          .find()
+          .project({
+            productName: 1,
+            category: 1,
+            supplier: 1,
+            stock: 1,
+            sellingPrice: 1,
+          })
+          .toArray();
+
+        res.send({
+          success: true,
+          data: products,
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Report Statistics
+    app.get("/reports/stats", async (req, res) => {
+      try {
+        const pendingOrders = await ordersCollection.countDocuments({
+          status: "Pending",
+        });
+
+        const lowStock = await productsCollection.countDocuments({
+          stock: {
+            $lte: 5,
+          },
+        });
+
+        const outOfStock = await productsCollection.countDocuments({
+          stock: 0,
+        });
+
+        const totalStock = await productsCollection
+          .aggregate([
+            {
+              $group: {
+                _id: null,
+                total: {
+                  $sum: "$stock",
+                },
+              },
+            },
+          ])
+          .toArray();
+
+        res.send({
+          success: true,
+          data: {
+            pendingOrders,
+            lowStock,
+            outOfStock,
+            totalStock: totalStock[0]?.total || 0,
+          },
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Dashboard Summary
+    app.get("/reports/dashboard", async (req, res) => {
+      try {
+        const [
+          totalProducts,
+          totalOrders,
+          totalPurchases,
+          totalCustomers,
+          totalSuppliers,
+        ] = await Promise.all([
+          productsCollection.countDocuments(),
+          ordersCollection.countDocuments(),
+          purchasesCollection.countDocuments(),
+          usersCollection.countDocuments({ role: "customer" }),
+          usersCollection.countDocuments({ role: "supplier" }),
+        ]);
+
+        const revenue = await ordersCollection
+          .aggregate([
+            {
+              $match: {
+                status: {
+                  $in: ["Delivered", "Shipped"],
+                },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: {
+                  $sum: "$totalAmount",
+                },
+              },
+            },
+          ])
+          .toArray();
+
+        res.send({
+          success: true,
+          data: {
+            totalProducts,
+            totalOrders,
+            totalPurchases,
+            totalCustomers,
+            totalSuppliers,
+            totalRevenue: revenue[0]?.total || 0,
+          },
+        });
+      } catch (err) {
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
+      }
+    });
+
+    // Bulk Delete Users
     app.delete("/users/bulk", async (req, res) => {
       try {
         const { userIds } = req.body;
@@ -565,7 +1181,6 @@ async function run() {
           });
         }
 
-        // Convert string IDs to ObjectId
         const objectIds = userIds
           .filter((id) => ObjectId.isValid(id))
           .map((id) => new ObjectId(id));
@@ -577,7 +1192,6 @@ async function run() {
           });
         }
 
-        // Prevent deleting admin users
         const usersToDelete = await usersCollection
           .find({ _id: { $in: objectIds } })
           .toArray();
@@ -611,12 +1225,11 @@ async function run() {
       }
     });
 
-    // Get Users by Role (Utility endpoint)
+    // Get Users by Role
     app.get("/users/role/:role", async (req, res) => {
       try {
         const role = req.params.role;
 
-        // Validate role
         const validRoles = ["admin", "customer", "supplier"];
         if (!validRoles.includes(role)) {
           return res.status(400).send({
